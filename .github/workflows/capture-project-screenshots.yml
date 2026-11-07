@@ -1,0 +1,167 @@
+name: Capture genuine project UI screenshots
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/capture-project-screenshots.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout portfolio
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install browser and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright Pillow streamlit pandas requests streamlit-keyup
+          python -m playwright install chromium --with-deps
+      - name: Clone project sources (public GitHub repositories)
+        run: |
+          mkdir -p /tmp/source-apps
+          for repo in load-balancing-simulator Nginx Resilient-Microservice Replication IR-Project Beneficiary-App; do
+            git clone --depth 1 "https://github.com/Amjad2001-art/$repo.git" "/tmp/source-apps/$repo"
+          done
+      - name: Capture genuine React and Streamlit UI
+        run: |
+          mkdir -p assets/screenshots
+          cat > /tmp/capture_ui.py <<'PY'
+          from pathlib import Path
+          import os, subprocess, time, urllib.request, signal
+          from playwright.sync_api import sync_playwright
+          BASE=Path('/tmp/source-apps')
+          OUT=Path('assets/screenshots')
+          names=['load-balancing-simulator','Resilient-Microservice','Nginx','Replication']
+          def wait(url, timeout=90):
+              start=time.monotonic()
+              while time.monotonic()-start<timeout:
+                  try:
+                      with urllib.request.urlopen(url,timeout=3) as res:
+                          if res.status==200:return True
+                  except Exception:pass
+                  time.sleep(1)
+              return False
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+              for i,name in enumerate(names):
+                  base=BASE/name
+                  port=5100+i
+                  try:
+                      if name!='Nginx':
+                          subprocess.run(['npm','install','--no-audit','--no-fund'],cwd=base,check=True,timeout=210)
+                          cmd=['npm','run','dev','--','--host','127.0.0.1','--port',str(port),'--strictPort']
+                      else:
+                          cmd=['node','server.mjs']
+                          port=5188
+                      with open('/tmp/'+name+'.log','w') as log:
+                          proc=subprocess.Popen(cmd,cwd=base,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+                      url=f'http://127.0.0.1:{port}'
+                      if not wait(url,65): raise RuntimeError('server failed to start')
+                      page=browser.new_page(viewport={'width':1440,'height':860},device_scale_factor=1)
+                      page.goto(url,wait_until='domcontentloaded',timeout=45000)
+                      page.wait_for_timeout(3800)
+                      txt=page.locator('body').inner_text(timeout=9000).strip()
+                      if len(txt)<30 or 'Internal Server Error' in txt:raise RuntimeError('missing UI body; '+txt[:120])
+                      screenshot=OUT/(name+'.png')
+                      page.screenshot(path=str(screenshot),full_page=False,animations='disabled')
+                      print('CAPTURED REAL REACT UI',name,'text length',len(txt),'path',screenshot,flush=True)
+                      page.close()
+                  except Exception as ex:
+                      print('FAILED',name,repr(ex),flush=True)
+                  finally:
+                      if 'proc' in locals() and proc.poll() is None:proc.kill()
+              ir=BASE/'IR-Project'
+              try:
+                  with open('/tmp/ir.log','w') as log:
+                      proc=subprocess.Popen(['python','-m','streamlit','run','frontend/streamlit_app.py','--server.headless','true','--server.port','8501','--browser.gatherUsageStats','false'],cwd=ir,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+                  url='http://127.0.0.1:8501'
+                  if not wait(url,65):raise RuntimeError('Streamlit failed to start')
+                  page=browser.new_page(viewport={'width':1440,'height':900},device_scale_factor=1)
+                  page.goto(url,wait_until='domcontentloaded',timeout=45000)
+                  page.wait_for_timeout(11000)
+                  txt=page.locator('body').inner_text(timeout=10000)
+                  if 'Information Retrieval' not in txt and 'Search' not in txt:raise RuntimeError('search UI not rendered: '+txt[:150])
+                  page.screenshot(path=str(OUT/'IR-Project.png'),full_page=False,animations='disabled')
+                  print('CAPTURED REAL PYTHON UI',len(txt),flush=True)
+                  page.close()
+              except Exception as ex:print('FAILED IR-Project',repr(ex),flush=True)
+              finally:
+                  if 'proc' in locals() and proc.poll() is None:proc.kill()
+              browser.close()
+          PY
+          python /tmp/capture_ui.py
+      - name: Set up Flutter SDK
+        id: flutter
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Capture actual Flutter application login screen
+        if: steps.flutter.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cd /tmp/source-apps/Beneficiary-App
+          flutter pub get
+          flutter build web --release
+          python -m http.server 8070 --directory build/web >/tmp/flutter_server.log 2>&1 &
+          cd "$GITHUB_WORKSPACE"
+          cat >/tmp/capture_flutter.py <<'PY'
+          import time,urllib.request
+          from playwright.sync_api import sync_playwright
+          url='http://127.0.0.1:8070'
+          for _ in range(50):
+              try:
+                  urllib.request.urlopen(url,timeout=3)
+                  break
+              except Exception:time.sleep(1)
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+              page=browser.new_page(viewport={'width':390,'height':844},device_scale_factor=1)
+              page.goto(url,wait_until='domcontentloaded',timeout=60000)
+              page.wait_for_timeout(18000)
+              title=page.title()
+              if 'حنين' not in title and 'Hanin' not in title:raise Exception('Flutter app was not loaded: '+title)
+              path='assets/screenshots/Beneficiary-App.png'
+              page.screenshot(path=path,full_page=False,animations='disabled')
+              print('CAPTURED REAL FLUTTER WEB UI',title,path,flush=True)
+              browser.close()
+          PY
+          python /tmp/capture_flutter.py
+      - name: Verify screenshots are not blank
+        run: |
+          python - <<'PY'
+          from PIL import Image,ImageStat
+          from pathlib import Path
+          for path in Path('assets/screenshots').glob('*.png'):
+              im=Image.open(path).convert('RGB')
+              stats=ImageStat.Stat(im)
+              if max(stats.stddev)<5:
+                  print('Removing blank image:',path)
+                  path.unlink()
+              else:
+                  print('Validated',path,im.size,'stddev',stats.stddev)
+          PY
+      - name: Commit genuine captures to portfolio repo
+        run: |
+          if ! ls assets/screenshots/*.png >/dev/null 2>&1; then echo "No valid screenshots captured"; exit 1; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/screenshots/
+          if git diff --cached --quiet; then echo "Screenshots unchanged"; exit 0; fi
+          git commit -m "Add genuine screenshots captured from running project source"
+          git push origin HEAD:main
